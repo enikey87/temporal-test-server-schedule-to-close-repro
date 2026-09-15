@@ -5,13 +5,11 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import com.google.protobuf.Timestamp;
 import io.temporal.activity.ActivityInterface;
-import io.temporal.activity.ActivityMethod;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.api.enums.v1.RetryState;
 import io.temporal.api.workflow.v1.PendingActivityInfo;
 import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionRequest;
-import io.temporal.api.workflowservice.v1.DescribeWorkflowExecutionResponse;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowClientOptions;
 import io.temporal.client.WorkflowFailedException;
@@ -31,22 +29,16 @@ import java.util.concurrent.TimeoutException;
 import org.junit.jupiter.api.Test;
 
 /**
- * An activity must be closed by its schedule-to-close deadline. When its next retry would start
- * after the deadline, the server fails it at once with RETRY_STATE_TIMEOUT. The test server skips
- * that check whenever the deadline falls on a whole second, and then never enforces the deadline at
- * all: the activity stays open past it.
+ * Expected: an activity is closed by its schedule-to-close deadline. Its next retry is 90 days
+ * away, so it fails right after the first attempt with RETRY_STATE_TIMEOUT.
  *
- * <p>The deadline is the schedule time plus five minutes, so roughly one run in a thousand hits a
- * whole second. The test keeps starting workflows until one does, or gives up after MAX_RUNS.
+ * <p>Actual: when the deadline falls on a whole second (about 1 run in 1000), the test server
+ * schedules the retry anyway, and the activity is still open after the deadline.
  */
 class ScheduleToCloseOnWholeSecondTest {
 
-  private static final String TASK_QUEUE = "repro";
-  private static final int MAX_RUNS = 20_000;
-
   @ActivityInterface
   public interface Gate {
-    @ActivityMethod
     void check();
   }
 
@@ -54,8 +46,8 @@ class ScheduleToCloseOnWholeSecondTest {
     @Override
     public void check() {
       throw ApplicationFailure.newBuilder()
-          .setMessage("retryable failure; the next attempt would start after schedule-to-close")
-          .setType("Outage")
+          .setMessage("retryable failure")
+          .setType("RetryableFailure") // required: without a type the SDK cannot report the failure
           .setNextRetryDelay(Duration.ofDays(90))
           .build();
     }
@@ -80,93 +72,78 @@ class ScheduleToCloseOnWholeSecondTest {
   }
 
   @Test
-  void failsAtScheduleToCloseEvenWhenDeadlineFallsOnWholeSecond() throws Exception {
+  void failsAtScheduleToCloseEvenWhenDeadlineFallsOnWholeSecond() {
     TestWorkflowEnvironment env = TestWorkflowEnvironment.newInstance();
+    Worker worker = env.newWorker("repro");
+    worker.registerWorkflowImplementationTypes(GateWorkflowImpl.class);
+    worker.registerActivitiesImplementations(new FailingGate());
+    env.start();
+    // Unlike env.getWorkflowClient(), this client never skips time while waiting for a result.
+    WorkflowClient client =
+        WorkflowClient.newInstance(
+            env.getWorkflowServiceStubs(),
+            WorkflowClientOptions.newBuilder().setNamespace(env.getNamespace()).build());
+
     try {
-      Worker worker = env.newWorker(TASK_QUEUE);
-      worker.registerWorkflowImplementationTypes(GateWorkflowImpl.class);
-      worker.registerActivitiesImplementations(new FailingGate());
-      env.start();
-      // A plain client: the environment's own client unlocks time skipping while awaiting a result.
-      WorkflowClient client =
-          WorkflowClient.newInstance(
-              env.getWorkflowServiceStubs(),
-              WorkflowClientOptions.newBuilder().setNamespace(env.getNamespace()).build());
+      for (int run = 1; run <= 20_000; run++) {
+        String workflowId = "run-" + run;
+        WorkflowStub workflow =
+            client.newUntypedWorkflowStub(
+                "GateWorkflow",
+                WorkflowOptions.newBuilder().setTaskQueue("repro").setWorkflowId(workflowId).build());
+        workflow.start();
+        if (failsWithin2s(workflow)) continue;
 
-      for (int run = 1; run <= MAX_RUNS; run++) {
-        String workflowId = "gate-" + run;
-        GateWorkflow workflow =
-            client.newWorkflowStub(
-                GateWorkflow.class,
-                WorkflowOptions.newBuilder()
-                    .setTaskQueue(TASK_QUEUE)
-                    .setWorkflowId(workflowId)
-                    .build());
-        WorkflowClient.start(workflow::run);
-        WorkflowStub stub = WorkflowStub.fromTyped(workflow);
-        if (closedWithTimeout(stub)) {
-          continue;
-        }
+        // Stuck: move the test server's clock a minute past the deadline and look again.
+        Timestamp deadline = pendingActivity(env, workflowId).getExpirationTime();
+        env.sleep(Duration.ofMillis(toMillis(deadline) + 60_000 - env.currentTimeMillis()));
+        if (failsWithin2s(workflow)) continue;
 
-        PendingActivityInfo scheduled = describe(env, workflowId).getPendingActivities(0);
-        long deadlineMillis = millis(scheduled.getExpirationTime());
-        env.sleep(Duration.ofMillis(deadlineMillis + 60_000 - env.currentTimeMillis()));
-        if (closedWithTimeout(stub)) {
-          continue;
-        }
-
-        DescribeWorkflowExecutionResponse after = describe(env, workflowId);
-        PendingActivityInfo pending = after.getPendingActivities(0);
         fail(
             String.format(
-                "Run %d: the activity is still open after its schedule-to-close deadline;"
-                    + " the previous %d runs failed with RETRY_STATE_TIMEOUT as expected.%n"
-                    + "  first attempt scheduled at: %s%n"
-                    + "  last failure:               %s%n"
-                    + "  schedule-to-close deadline: %s (nanos=%d)%n"
-                    + "  test server time now:       %s%n"
-                    + "  workflow status:            %s, activity attempt %d",
+                "Run %d: the activity is still open after its schedule-to-close deadline"
+                    + " (the previous %d runs failed as expected).%n"
+                    + "  deadline:    %s (nanos=%d)%n"
+                    + "  server time: %s%n"
+                    + "  attempt:     %d",
                 run,
                 run - 1,
-                Instant.ofEpochMilli(millis(scheduled.getScheduledTime())),
-                pending.getLastFailure().getMessage(),
-                Instant.ofEpochMilli(deadlineMillis),
-                scheduled.getExpirationTime().getNanos(),
+                Instant.ofEpochSecond(deadline.getSeconds(), deadline.getNanos()),
+                deadline.getNanos(),
                 Instant.ofEpochMilli(env.currentTimeMillis()),
-                after.getWorkflowExecutionInfo().getStatus(),
-                pending.getAttempt()));
+                pendingActivity(env, workflowId).getAttempt()));
       }
     } finally {
       env.close();
     }
   }
 
-  /** False when the workflow is still running after two seconds. */
-  private static boolean closedWithTimeout(WorkflowStub stub) {
+  /** True if the workflow failed with RETRY_STATE_TIMEOUT within 2s, false if it is still running. */
+  private static boolean failsWithin2s(WorkflowStub workflow) {
     try {
-      stub.getResult(2, TimeUnit.SECONDS, Void.class);
-      fail("workflow unexpectedly completed");
-    } catch (WorkflowFailedException e) {
-      assertEquals(RetryState.RETRY_STATE_TIMEOUT, ((ActivityFailure) e.getCause()).getRetryState());
-      return true;
+      workflow.getResult(2, TimeUnit.SECONDS, Void.class);
     } catch (TimeoutException e) {
       return false;
+    } catch (WorkflowFailedException e) {
+      assertEquals(
+          RetryState.RETRY_STATE_TIMEOUT, ((ActivityFailure) e.getCause()).getRetryState());
+      return true;
     }
-    return true;
+    throw new AssertionError("expected the workflow to fail");
   }
 
-  private static DescribeWorkflowExecutionResponse describe(
-      TestWorkflowEnvironment env, String workflowId) {
+  private static PendingActivityInfo pendingActivity(TestWorkflowEnvironment env, String workflowId) {
     return env.getWorkflowServiceStubs()
         .blockingStub()
         .describeWorkflowExecution(
             DescribeWorkflowExecutionRequest.newBuilder()
                 .setNamespace(env.getNamespace())
                 .setExecution(WorkflowExecution.newBuilder().setWorkflowId(workflowId))
-                .build());
+                .build())
+        .getPendingActivities(0);
   }
 
-  private static long millis(Timestamp timestamp) {
+  private static long toMillis(Timestamp timestamp) {
     return timestamp.getSeconds() * 1000 + timestamp.getNanos() / 1_000_000;
   }
 }

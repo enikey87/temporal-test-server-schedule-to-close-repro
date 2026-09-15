@@ -14,12 +14,10 @@ Requires a JDK 11+.
 ## Actual output
 
 ```
-Run 1319: the activity is still open after its schedule-to-close deadline; the previous 1318 runs failed with RETRY_STATE_TIMEOUT as expected.
-  first attempt scheduled at: 2026-09-15T10:18:19Z
-  last failure:               retryable failure; the next attempt would start after schedule-to-close
-  schedule-to-close deadline: 2026-09-15T10:23:19Z (nanos=0)
-  test server time now:       2026-09-15T10:24:21.211Z
-  workflow status:            WORKFLOW_EXECUTION_STATUS_RUNNING, activity attempt 2
+Run 956: the activity is still open after its schedule-to-close deadline (the previous 955 runs failed as expected).
+  deadline:    2026-09-15T10:56:18Z (nanos=0)
+  server time: 2026-09-15T10:57:20.202Z
+  attempt:     2
 ```
 
 It has reproduced in every run so far; the stuck activity is always scheduled on a whole second.
