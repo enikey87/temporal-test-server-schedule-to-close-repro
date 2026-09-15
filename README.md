@@ -1,13 +1,30 @@
-# Test server ignores schedule-to-close when the deadline falls on a whole second
+# Test server ignores scheduleToCloseTimeout when the deadline falls on a whole second
 
-An activity with `scheduleToCloseTimeout = 5m` fails with a retryable `ApplicationFailure` whose
-`nextRetryDelay` (90 days) is past the deadline. The Temporal server fails it at once with
-`RETRY_STATE_TIMEOUT` ([`retry.go`](https://github.com/temporalio/temporal/blob/main/service/history/workflow/retry.go)).
-The test server does the same, except when the deadline lands exactly on a whole second: then it
-schedules the retry, and the activity is still open after the deadline has passed.
+The test server keeps an activity open past its schedule-to-close deadline whenever that deadline
+lands exactly on a whole second. With millisecond timestamps this hits about one activity in a
+thousand, and shows up as tests that hang at random.
 
-The check that is skipped:
-[`TestServiceRetryState.java#L132`](https://github.com/temporalio/sdk-java/blob/v1.39.0/temporal-test-server/src/main/java/io/temporal/internal/testservice/TestServiceRetryState.java#L132)
+## Expected Behavior
+
+An activity whose next retry would start after its `scheduleToCloseTimeout` fails right away with
+`RETRY_STATE_TIMEOUT`, as the Temporal server does
+([`retry.go#L108`](https://github.com/temporalio/temporal/blob/34f6679d2f5e09755a16a715a73bfec92486cd83/service/history/workflow/retry.go#L108)).
+In any case it is closed once the deadline has passed.
+
+## Actual Behavior
+
+When the deadline falls on a whole second, the test server schedules the retry anyway, and the
+activity is still open after the deadline has passed:
+
+```
+Run 588: the activity is still open after its schedule-to-close deadline (the previous 587 runs failed as expected).
+  deadline:    2026-09-15T10:57:26Z (nanos=0)
+  server time: 2026-09-15T10:58:28.228Z
+  attempt:     2
+```
+
+The deadline check treats `nanos == 0` as "no deadline"
+([`TestServiceRetryState.java#L132`](https://github.com/temporalio/sdk-java/blob/v1.39.0/temporal-test-server/src/main/java/io/temporal/internal/testservice/TestServiceRetryState.java#L132)):
 
 ```java
 if (expirationTime.getNanos() != 0
@@ -16,15 +33,28 @@ if (expirationTime.getNanos() != 0
 }
 ```
 
-Nothing enforces the deadline afterwards: the schedule-to-close timer is registered for the first
-attempt only and is discarded once the attempt number changes.
+Nothing enforces the deadline later: the schedule-to-close timer is registered for the first
+attempt only
+([`TestWorkflowMutableStateImpl.java#L1060-L1066`](https://github.com/temporalio/sdk-java/blob/v1.39.0/temporal-test-server/src/main/java/io/temporal/internal/testservice/TestWorkflowMutableStateImpl.java#L1060-L1066))
+and is dropped as an outdated timer once the attempt number changes
+([`#L2302-L2305`](https://github.com/temporalio/sdk-java/blob/v1.39.0/temporal-test-server/src/main/java/io/temporal/internal/testservice/TestWorkflowMutableStateImpl.java#L2302-L2305)).
 
-About one activity in a thousand is scheduled on a whole second, so each reproduction starts
-workflows one by one until one is still running two seconds after its activity failed, skips the
-test server's time past the deadline, and fails if the activity is still open. It takes a few
-seconds and gives up after 20,000 workflows.
+## Steps to Reproduce the Problem
 
-| Directory | SDK | Run |
-|-|-|-|
-| [`typescript/`](typescript) | `@temporalio/testing` 1.24.0 (test server binary) | `npm ci && npm test` |
-| [`java/`](java) | `io.temporal:temporal-testing` 1.39.0 (in-process test server) | `./gradlew test` |
+  1. Define an activity with `scheduleToCloseTimeout = 5m` that throws a retryable
+     `ApplicationFailure` with `nextRetryDelay = 90 days`.
+  1. Start workflows calling it one by one against the test server, and wait up to 2 s for each
+     to fail.
+  1. For the first one still running (usually within a couple of thousand runs), skip the test
+     server's time past the deadline: the activity is still open, on attempt 2.
+
+Runnable reproductions, each failing within seconds:
+
+- Java, in-process test server: [`java/`](java) — `./gradlew test`
+- TypeScript, test server binary: [`typescript/`](typescript) — `npm ci && npm test`
+
+## Specifications
+
+  - Version: `io.temporal:temporal-testing` 1.39.0; the same test server binary (1.39.0) is used by
+    `@temporalio/testing` 1.24.0. Not a regression: the check dates back to temporalio/sdk-java#163 (2020).
+  - Platform: Linux x86_64, OpenJDK 21.0.12, Node 24.15.0.
