@@ -9,22 +9,20 @@ from `io.temporal:temporal-testing:1.39.0`.
 ./gradlew test
 ```
 
-Requires a JDK 11+. Time skipping is disabled; the bug does not depend on it.
+Requires a JDK 11+.
 
 ## Actual output
 
 ```
-Run 111: workflow is still running 2s after its activity failed; the previous 110 runs failed with RETRY_STATE_TIMEOUT as expected.
-  activity state:             PENDING_ACTIVITY_STATE_STARTED, attempt 2
-  first attempt scheduled at: 2026-09-15T09:21:59.000Z
-  last attempt completed at:  2026-09-15T09:21:59.001Z
+Run 1319: the activity is still open after its schedule-to-close deadline; the previous 1318 runs failed with RETRY_STATE_TIMEOUT as expected.
+  first attempt scheduled at: 2026-09-15T10:18:19Z
   last failure:               retryable failure; the next attempt would start after schedule-to-close
-  schedule-to-close deadline: 2026-09-15T09:26:59.000Z (nanos=0)
-The next retry is 90 days away, past the deadline, yet the activity was rescheduled instead of failing.
+  schedule-to-close deadline: 2026-09-15T10:23:19Z (nanos=0)
+  test server time now:       2026-09-15T10:24:21.211Z
+  workflow status:            WORKFLOW_EXECUTION_STATUS_RUNNING, activity attempt 2
 ```
 
-Four runs reproduced it at runs 1430, 910, 111 and 1674; every stuck deadline had `nanos=0`,
-every other run failed with `RETRY_STATE_TIMEOUT`.
+It has reproduced in every run so far; the stuck activity is always scheduled on a whole second.
 
 ## Environment
 

@@ -1,6 +1,7 @@
-// An activity whose next retry would start after its schedule-to-close deadline must fail with
-// RetryState.TIMEOUT. The test server skips that check whenever the deadline falls on a whole
-// second, so the activity is rescheduled and the workflow stays running.
+// An activity must be closed by its schedule-to-close deadline. When its next retry would start
+// after the deadline, the server fails it at once with RetryState.TIMEOUT. The test server skips
+// that check whenever the deadline falls on a whole second, and then never enforces the deadline
+// at all: the activity stays open past it.
 //
 // The deadline is the schedule time plus five minutes, so roughly one run in a thousand hits a
 // whole second. The test keeps starting workflows until one does, or gives up after MAX_RUNS.
@@ -23,7 +24,7 @@ const STILL_RUNNING = Symbol('still running');
 // The worker logs every failed activity attempt; the repro produces thousands.
 Runtime.install({ logger: new DefaultLogger('ERROR') });
 
-test('activity fails when its next retry would start after schedule-to-close', async () => {
+test('activity fails at schedule-to-close even when the deadline falls on a whole second', async () => {
   const env = await TestWorkflowEnvironment.createTimeSkipping();
   try {
     // A plain client: the environment's own client unlocks time skipping while awaiting a result.
@@ -41,26 +42,32 @@ test('activity fails when its next retry would start after schedule-to-close', a
           taskQueue: TASK_QUEUE,
           workflowId: `gate-${run}`,
         });
-        const outcome = await settleWithin(client, handle, 2_000);
+        let outcome = await settleWithin(client, handle, 2_000);
 
         if (outcome === STILL_RUNNING) {
-          const { raw } = await handle.describe();
-          const pending = raw.pendingActivities?.[0];
-          assert.fail(
-            [
-              `Run ${run}: workflow is still running 2s after its activity failed;` +
-                ` the previous ${run - 1} runs failed with RetryState.TIMEOUT as expected.`,
-              `  attempt:                    ${pending?.attempt}`,
-              `  first attempt scheduled at: ${format(pending?.scheduledTime)}`,
-              `  last attempt completed at:  ${format(pending?.lastAttemptCompleteTime)}`,
-              `  last failure:               ${pending?.lastFailure?.message}`,
-              `  schedule-to-close deadline: ${format(pending?.expirationTime)} (nanos=${pending?.expirationTime?.nanos ?? 0})`,
-              'The next retry is 90 days away, past the deadline, yet the activity was rescheduled instead of failing.',
-            ].join('\n'),
-          );
+          const scheduled = (await handle.describe()).raw.pendingActivities?.[0];
+          const deadlineMs = millis(scheduled?.expirationTime);
+          await env.sleep(deadlineMs + 60_000 - (await env.currentTimeMs()));
+          outcome = await settleWithin(client, handle, 2_000);
+
+          if (outcome === STILL_RUNNING) {
+            const { status, raw } = await handle.describe();
+            const pending = raw.pendingActivities?.[0];
+            assert.fail(
+              [
+                `Run ${run}: the activity is still open after its schedule-to-close deadline;` +
+                  ` the previous ${run - 1} runs failed with RetryState.TIMEOUT as expected.`,
+                `  first attempt scheduled at: ${iso(millis(scheduled?.scheduledTime))}`,
+                `  last failure:               ${pending?.lastFailure?.message}`,
+                `  schedule-to-close deadline: ${iso(deadlineMs)} (nanos=${scheduled?.expirationTime?.nanos ?? 0})`,
+                `  test server time now:       ${iso(await env.currentTimeMs())}`,
+                `  workflow status:            ${status.name}, activity attempt ${pending?.attempt}`,
+              ].join('\n'),
+            );
+          }
         }
 
-        assert.ok(outcome instanceof Error && outcome.cause instanceof ActivityFailure, `run ${run}: ${outcome}`);
+        assert.ok(outcome instanceof Error && outcome.cause instanceof ActivityFailure, `run ${run}: ${String(outcome)}`);
         assert.equal(outcome.cause.retryState, RetryState.TIMEOUT);
       }
     });
@@ -70,11 +77,7 @@ test('activity fails when its next retry would start after schedule-to-close', a
 });
 
 // Cancels the pending result() RPC after `ms` so a stuck run does not outlive the test.
-async function settleWithin(
-  client: Client,
-  handle: WorkflowHandle,
-  ms: number,
-): Promise<unknown> {
+async function settleWithin(client: Client, handle: WorkflowHandle, ms: number): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
@@ -86,8 +89,10 @@ async function settleWithin(
   }
 }
 
-function format(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): string {
-  if (!ts) return 'n/a';
-  const millis = Number(ts.seconds ?? 0) * 1000 + Math.floor((ts.nanos ?? 0) / 1e6);
-  return new Date(millis).toISOString();
+function millis(ts: { seconds?: unknown; nanos?: number | null } | null | undefined): number {
+  return ts ? Number(ts.seconds ?? 0) * 1000 + Math.floor((ts.nanos ?? 0) / 1e6) : 0;
+}
+
+function iso(ms: number): string {
+  return new Date(ms).toISOString();
 }
