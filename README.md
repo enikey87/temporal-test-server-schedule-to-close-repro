@@ -17,9 +17,9 @@ When the deadline falls on a whole second, the test server schedules the retry a
 activity is still open after the deadline has passed:
 
 ```
-Run 588: the activity is still open after its schedule-to-close deadline (the previous 587 runs failed as expected).
-  deadline:    2026-09-15T10:57:26Z (nanos=0)
-  server time: 2026-09-15T10:58:28.228Z
+Run 150: the activity is still open after its schedule-to-close deadline (the previous 149 runs failed as expected).
+  deadline:    2026-09-15T10:37:03.000Z (nanos=0)
+  server time: 2026-09-15T10:38:05.005Z
   attempt:     2
 ```
 
@@ -48,13 +48,16 @@ and is dropped as an outdated timer once the attempt number changes
   1. For the first one still running (usually within a couple of thousand runs), skip the test
      server's time past the deadline: the activity is still open, on attempt 2.
 
-Runnable reproductions, each failing within seconds:
+A runnable reproduction is in [`typescript/`](typescript), failing within seconds:
 
-- Java, in-process test server: [`java/`](java) — `./gradlew test`
-- TypeScript, test server binary: [`typescript/`](typescript) — `npm ci && npm test`
+```bash
+cd typescript
+npm ci
+npm test
+```
 
 ## Specifications
 
-  - Version: `io.temporal:temporal-testing` 1.39.0; the same test server binary (1.39.0) is used by
-    `@temporalio/testing` 1.24.0. Not a regression: the check dates back to temporalio/sdk-java#163 (2020).
-  - Platform: Linux x86_64, OpenJDK 21.0.12, Node 24.15.0.
+  - Version: test server 1.39.0, downloaded by `@temporalio/testing` 1.24.0. Not a regression: the
+    check dates back to temporalio/sdk-java#163 (2020).
+  - Platform: Linux x86_64, Node 24.15.0.
