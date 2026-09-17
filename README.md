@@ -33,6 +33,12 @@ if (expirationTime.getNanos() != 0
 }
 ```
 
+It reads that way since [#163](https://github.com/temporalio/sdk-java/pull/163), a mechanical
+`long` to `Timestamp` migration, where the same "is the deadline set?" test was translated as
+`Timestamps.toMillis(expirationTime) == 0` in the two sibling checks and as `getNanos() != 0` only
+here. Before that migration the field was already normalised to `Long.MAX_VALUE` when unset, so
+the guard was redundant rather than harmful.
+
 Nothing enforces the deadline later: the schedule-to-close timer is registered for the first
 attempt only
 ([`TestWorkflowMutableStateImpl.java#L1060-L1066`](https://github.com/temporalio/sdk-java/blob/v1.39.0/temporal-test-server/src/main/java/io/temporal/internal/testservice/TestWorkflowMutableStateImpl.java#L1060-L1066))
@@ -59,5 +65,5 @@ npm test
 ## Specifications
 
   - Version: test server 1.39.0, downloaded by `@temporalio/testing` 1.24.0. Not a regression: the
-    check dates back to temporalio/sdk-java#163 (2020).
+    check has read this way since 2020.
   - Platform: Linux x86_64, Node 24.15.0.
