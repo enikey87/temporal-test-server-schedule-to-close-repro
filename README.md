@@ -1,5 +1,11 @@
 # Test server ignores scheduleToCloseTimeout when the deadline falls on a whole second
 
+> **Status: fixed upstream.** [temporalio/sdk-java#3096](https://github.com/temporalio/sdk-java/pull/3096)
+> (merged 2026-09-30) drops the faulty `getNanos()` guard. The fix is not yet in a release:
+> v1.39.0 and v1.40.0 (latest as of 2026-10-05) still carry the bug, and the reproduction below
+> still fails against them. It should ship with the next sdk-java release and reach TypeScript
+> projects once `@temporalio/testing` bundles a fixed test-server binary.
+
 The test server keeps an activity open past its schedule-to-close deadline whenever that deadline
 lands exactly on a whole second. With millisecond timestamps this hits about one activity in a
 thousand, and shows up as tests that hang at random.
